@@ -220,6 +220,14 @@ def generate_tests(request: RequirementRequest):
                 detail="The AI did not return structured test cases.",
             )
 
+        if not result.test_cases:
+            logger.error("OpenAI returned an empty test case collection")
+
+            raise HTTPException(
+                status_code=502,
+                detail="The AI returned an empty test case collection.",
+            )
+
         test_cases = [
             case.model_dump() for case in result.test_cases
         ]

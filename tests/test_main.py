@@ -1,12 +1,15 @@
-
+import pytest
+import main
 from types import SimpleNamespace
 from unittest.mock import Mock
-
-import pytest
+from openai import RateLimitError, APIConnectionError, APIStatusError
 from fastapi.testclient import TestClient
 
-import main
 
+def make_openai_error(error_type, message):
+    error = error_type.__new__(error_type)
+    Exception.__init__(error, message)
+    return error
 
 @pytest.fixture
 def client(monkeypatch):
@@ -162,3 +165,132 @@ def test_retrieve_missing_run_returns_404(client, monkeypatch):
     response = client.get("/test-runs/999999")
 
     assert response.status_code == 404
+
+
+
+def test_generate_tests_handles_rate_limit(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_client = Mock()
+    fake_client.responses.parse.side_effect = make_openai_error(
+        RateLimitError, "Rate limit exceeded"
+    )
+
+    monkeypatch.setattr(
+        main, "OpenAI", Mock(return_value=fake_client)
+    )
+
+    response = client.post(
+        "/generate-tests",
+        json={"requirement": "Users can log in with email and password"},
+    )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == (
+        "AI service rate limit reached. Please try again later."
+    )
+
+
+def test_generate_tests_handles_connection_error(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_client = Mock()
+    fake_client.responses.parse.side_effect = make_openai_error(
+        APIConnectionError, "Connection failed"
+    )
+
+    monkeypatch.setattr(
+        main, "OpenAI", Mock(return_value=fake_client)
+    )
+
+    response = client.post(
+        "/generate-tests",
+        json={"requirement": "Users can log in with email and password"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "AI service is temporarily unavailable."
+    )
+
+
+def test_generate_tests_handles_api_status_error(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_client = Mock()
+    fake_client.responses.parse.side_effect = make_openai_error(
+        APIStatusError, "Upstream API failure"
+    )
+
+    monkeypatch.setattr(
+        main, "OpenAI", Mock(return_value=fake_client)
+    )
+
+    response = client.post(
+        "/generate-tests",
+        json={"requirement": "Users can log in with email and password"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "AI service request failed."
+
+
+def test_generate_tests_handles_empty_structured_output(
+    client, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_client = Mock()
+    fake_client.responses.parse.return_value = SimpleNamespace(
+        output_parsed=None
+    )
+
+    monkeypatch.setattr(
+        main, "OpenAI", Mock(return_value=fake_client)
+    )
+
+    response = client.post(
+        "/generate-tests",
+        json={"requirement": "Users can log in with email and password"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "The AI did not return structured test cases."
+    )
+
+
+
+def test_generate_tests_handles_empty_test_case_collection(
+    client, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    fake_client = Mock()
+    fake_client.responses.parse.return_value = SimpleNamespace(
+        output_parsed=main.TestCaseCollection(test_cases=[])
+    )
+
+    monkeypatch.setattr(
+        main,
+        "OpenAI",
+        Mock(return_value=fake_client),
+    )
+
+    response = client.post(
+        "/generate-tests",
+        json={
+            "requirement": (
+                "Users can log in using their registered email "
+                "and password"
+            )
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "The AI returned an empty test case collection."
+    )
+
+    # An invalid generation must not be persisted.
+    main.save_test_run.assert_not_called()
